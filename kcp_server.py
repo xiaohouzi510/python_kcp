@@ -8,7 +8,7 @@ import errno
 
 udp_addr = None
 
-def out_fun(data,user_data):
+def out_fun(user_data,data):
 	user_data.sendto(data,udp_addr)
 
 def recv_udp(sock):

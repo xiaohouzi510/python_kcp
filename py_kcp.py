@@ -3,7 +3,7 @@
 
 import struct
 
-IKCP_RTO_NDL 	 = 30			#no delay min rto
+IKCP_RTO_NDL 	 = 50			#no delay min rto
 IKCP_RTO_MIN 	 = 100			#normal min rto
 IKCP_RTO_DEF 	 = 200
 IKCP_RTO_MAX 	 = 60000
@@ -19,11 +19,24 @@ IKCP_MTU_DEF 	 = 1400
 IKCP_ACK_FAST	 = 3
 IKCP_INTERVAL	 = 100
 IKCP_OVERHEAD    = 24
-IKCP_DEADLINK    = 20
+IKCP_DEADLINK    = 10
 IKCP_THRESH_INIT = 2
 IKCP_THRESH_MIN  = 2
 IKCP_PROBE_INIT  = 7000			# 7 secs to probe window size
 IKCP_PROBE_LIMIT = 120000		# up to 120 secs to probe window
+
+IKCP_LOG_OUTPUT	   = 1
+IKCP_LOG_INPUT	   = 2
+IKCP_LOG_SEND	   = 4
+IKCP_LOG_RECV	   = 8
+IKCP_LOG_IN_DATA   = 16
+IKCP_LOG_IN_ACK	   = 32
+IKCP_LOG_IN_PROBE  = 64
+IKCP_LOG_IN_WINS   = 128
+IKCP_LOG_OUT_DATA  = 256
+IKCP_LOG_OUT_ACK   = 512
+IKCP_LOG_OUT_PROBE = 1024
+IKCP_LOG_OUT_WINS  = 2048
 
 TYPE_32_LEN = 4
 TYPE_16_LEN = 2
@@ -104,14 +117,22 @@ class py_kcp():
 		self.m_fast_resend 	     = 0
 		self.m_nocwnd 			 = False
 		self.m_stream 			 = False
-		self.m_log_mask 		 = 0
 		self.m_out_put_fun 	     = out_put_fun
 		self.m_write_log_fun     = write_log_fun
+		self.m_log_mask 		 = 0
 		self.m_cur_seg 			 = segment_node()
 		self.m_cur_seg.m_user_key= user_key
 		self.m_buff_array 		 = []
 		self.m_array_len 		 = 0
 		self.m_big_endian     	 = False #大端
+
+	#添加日志掩码
+	def add_log_mask(self,mask):
+		self.m_log_mask |= mask
+
+	#是否可以打日志
+	def can_log(self,mask):
+		return self.m_log_mask & mask and self.m_write_log_fun != None
 
 	#设置参数
 	def set_nodelay(self,nodelay,interval,fast_resend,nocwnd):
@@ -140,7 +161,7 @@ class py_kcp():
 
 	#发送数据
 	def output_data(self):
-		self.m_out_put_fun(''.join(self.m_buff_array),self.m_user_data)
+		self.m_out_put_fun(self.m_user_data,''.join(self.m_buff_array))
 
 	#打包 8 位
 	def pack_8bit(self,value,buff_array):
@@ -197,7 +218,8 @@ class py_kcp():
 		self.pack_32bit(seg.m_sequence,self.m_buff_array)
 		self.pack_32bit(seg.m_receive_next,self.m_buff_array)
 		self.pack_32bit(len(seg.m_data),self.m_buff_array)
-		self.m_buff_array.append(seg.m_data)
+		if len(seg.m_data) > 0:
+			self.m_buff_array.append(seg.m_data)
 		self.m_array_len += IKCP_OVERHEAD + len(seg.m_data) 
 
 	#处理发送数据
@@ -379,7 +401,7 @@ class py_kcp():
 				if self.m_nodelay:
 					cur_send.m_rto += self.m_rto 
 				else:
-					cur_send.m_rto += (self.m_rto/2)
+					cur_send.m_rto += int(self.m_rto/2)
 				cur_send.m_resend_tm = self.m_cur_tm + cur_send.m_rto
 				is_timeout = True
 			elif cur_send.m_fast_ack >= resend:
@@ -402,14 +424,14 @@ class py_kcp():
 			self.deal_net_data()
 		if is_repeated:
 			inflight = self.m_send_next - self.m_ack_knowledge
-			self.m_ssthresh = (inflight/2)
+			self.m_ssthresh = int(inflight/2)
 			if self.m_ssthresh < IKCP_THRESH_MIN:
 				self.m_ssthresh = IKCP_THRESH_MIN
 			self.m_cwnd     = self.m_ssthresh + resend
 			self.m_increase = self.m_cwnd * self.m_mss
 
 		if is_timeout:
-			self.m_ssthresh = (cwnd/2)
+			self.m_ssthresh = int(cwnd/2)
 			if self.m_ssthresh < IKCP_THRESH_MIN:
 				self.m_ssthresh = IKCP_THRESH_MIN 
 			self.m_cwnd     = 1
@@ -422,13 +444,13 @@ class py_kcp():
 	#一次可接收数据大小
 	def peek_size(self):
 		if self.link_empty(self.m_receive_queue):
-			return 0
+			return -1
 		cur_seg = self.m_receive_queue.m_head
 		if cur_seg.m_index == 0:
 			return len(cur_seg.m_data)
-		#why?
-		if m_receive_queue.m_count < cur_seg.m_index + 1:
-			return 0
+		#m_index 用于组合一个包，如：5、4、3、2、1、0 表示一个包
+		if self.m_receive_queue.m_count < cur_seg.m_index + 1:
+			return -1
 		while cur_seg != None:
 			length += len(cur_seg.m_data)	
 			if cur_seg.m_index == 0:
@@ -440,7 +462,10 @@ class py_kcp():
 	def recv_data(self):	
 		if self.link_empty(self.m_receive_queue):
 			return None 
-		recover = False
+		peeksize = self.peek_size()
+		if peeksize < 0:
+			return None
+		recover  = False
 		#接收窗口为 0
 		if self.m_receive_queue.m_count >= self.m_receive_win:
 			recover = True
@@ -463,11 +488,9 @@ class py_kcp():
 				self.m_receive_next += 1
 			else:
 				break
-
 		#通告对方有可使用的接收窗口
 		if self.m_receive_queue.m_count < self.m_receive_win and recover:
 			self.m_probe_mask |= IKCP_ASK_TELL
-
 		return ''.join(result_data)
 
 	#创建一个新结点
@@ -490,8 +513,8 @@ class py_kcp():
 				tail_seg.m_data = tail_seg.m_data + data[0:extend]
 				surplus_length -= extend
 				use_lenght 	   += extend
-		if surplus_length <= 0:
-			return 0
+			if surplus_length <= 0:
+				return 0
 		count = int((surplus_length + self.m_mss - 1)/self.m_mss)
 		if count > 255:
 			return -2
@@ -581,19 +604,19 @@ class py_kcp():
 		self.m_ack_count += 1
 
 	#解析数据
-	def parse_data(self,seg_node):
-		cur_node  = self.m_receive_buf.m_head
+	def parse_data(self,new_node):
+		cur_node  = self.m_receive_buf.m_tail
 		repeat = False
+		#注意：该链表从尾部开始遍历
 		while cur_node != None:	
-			if cur_node.m_sequence == seg_node.m_sequence:
+			if cur_node.m_sequence == new_node.m_sequence:
 				repeat = True
 				break
-			if self.value_diff(seg_node.m_sequence,cur_node.m_sequence) > 0:
+			if self.value_diff(new_node.m_sequence,cur_node.m_sequence) > 0:
 				break
 			cur_node = cur_node.m_next
 		if not repeat:
-			self.add_node(self.m_receive_buf,cur_node,seg_node)
-
+			self.add_node(self.m_receive_buf,cur_node,new_node)
 		while not self.link_empty(self.m_receive_buf):
 			head_node = self.m_receive_buf.m_head
 			if head_node.m_sequence == self.m_receive_next and self.m_receive_queue.m_count < self.m_receive_win: 		
@@ -605,12 +628,12 @@ class py_kcp():
 
 	#向链表指定结点前添加结点
 	def add_node(self,link,cur_node,new_node):
-		#链表为空、当前结点为头结点
-		if self.link_empty(link) or cur_node == link.m_head:	
-			self.add_head(link,new_node)
-		#当前结点为空，表示向后添加
-		elif cur_node == None:
+		#链表为空、当前结点为尾结点
+		if self.link_empty(link) or cur_node == link.m_tail:	
 			self.add_tail(link,new_node)
+		#当前结点为空，表示向头添加
+		elif cur_node == None or cur_node == link.m_head:
+			self.add_head(link,new_node)
 		#有当前结点
 		else:
 			pre_node = cur_node.m_front
@@ -636,6 +659,7 @@ class py_kcp():
 		surplus_length = len(data)
 		use_lenght     = 0 
 		if surplus_length < IKCP_OVERHEAD:
+			print("surplus_length error")
 			return -1
 		flag 	      = False
 		maxack  	  = 0
@@ -648,6 +672,7 @@ class py_kcp():
 			#用户 key
 			cur_seg.m_user_key,use_lenght = self.unpack_32bit(data,use_lenght,TYPE_32_LEN)
 			if cur_seg.m_user_key != self.m_user_key:
+				print("user key error")
 				return -1
 			cur_seg.m_cmd,use_lenght  	      = self.unpack_8bit(data,use_lenght,TYPE_8_LEN)
 			cur_seg.m_index,use_lenght        = self.unpack_8bit(data,use_lenght,TYPE_8_LEN)
@@ -659,8 +684,10 @@ class py_kcp():
 
 			surplus_length -= IKCP_OVERHEAD
 			if surplus_length < data_len:
+				print("surplus_length < data_len")
 				return -2
 			if not self.check_cmd(cur_seg.m_cmd):
+				print("cmd error")
 				return -3
 			self.m_remote_win = cur_seg.m_wind_size
 			self.parse_ack_knowledge(cur_seg.m_receive_next)
@@ -671,13 +698,15 @@ class py_kcp():
 					self.update_rto(rtt)
 				self.parse_ack(cur_seg.m_sequence)
 				self.shrink_buf()
+				if self.can_log(IKCP_LOG_IN_ACK):
+					self.m_write_log_fun(self.m_user_data,"sn=%d rtt=%d rto=%d"%(cur_seg.m_sequence,rtt,self.m_rto))
 				if not flag:
 					flag   = True
 					maxack = cur_seg.m_sequence
 				elif self.value_diff(cur_seg.m_sequence,maxack) > 0:
 					maxack = cur_seg.m_sequence
 			elif cur_seg.m_cmd == IKCP_CMD_PUSH:
-				if self.value_diff(cur_seg.m_sequence,self.m_receive_next + self.m_receive_win):
+				if self.value_diff(cur_seg.m_sequence,self.m_receive_next + self.m_receive_win) < 0:
 					self.push_ack(cur_seg.m_sequence,cur_seg.m_time_stamp)
 					if self.value_diff(cur_seg.m_sequence,self.m_receive_next) >= 0:
 						new_seg = self.create_node()
@@ -697,9 +726,7 @@ class py_kcp():
 				self.m_probe_mask = self.m_probe_mask
 			surplus_length -= data_len
 			use_lenght 	   += data_len
-
 		flag and self.parse_fastack(maxack)
-
 		sun_alter = self.value_diff(self.m_ack_knowledge,old_ack_knowledge)
 		if sun_alter > 0 and self.m_cwnd < self.m_remote_win:
 			if self.m_cwnd < self.m_ssthresh:
@@ -728,6 +755,19 @@ class py_kcp():
 			if self.value_diff(self.m_cur_tm,self.m_flush_tm) >= 0:
 				self.m_flush_tm = self.m_cur_tm + self.m_interval
 			self.flush_data()
+
+	#设置窗口大小
+	def win_size(self,send_win,recv_win):
+		if send_win > 0:
+			self.m_send_win = send_win			
+		if recv_win > 0:
+			self.m_receive_win = recv_win		
+
+	#设置 mtu
+	def mtu_size(self,mtu):
+		if mtu < 50 or mtu < IKCP_OVERHEAD:
+			return False
+		self.m_mtu = mtu
 
 	#打印链表所有数据
 	def link_display(self,link):

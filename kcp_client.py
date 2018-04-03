@@ -50,7 +50,7 @@ class data_thread(threading.Thread):
 	def get_data(self):
 		self.m_lock.acquire()	
 		#-1 表示该队列已满，相等表示该队列为空
-		if self.m_head == self.m_tail or self.m_tail == -1:
+		if self.m_head == self.m_tail:
 			data = None
 		else:
 			data = self.m_data_queue[self.m_head] 
@@ -65,6 +65,7 @@ class data_thread(threading.Thread):
 		self.m_data_queue[self.m_tail] = data
 		self.m_tail += 1 
 		self.m_tail %= self.m_cap
+		#处理队列满情况
 		if self.m_tail == self.m_head:
 			self.m_head += 1
 			self.m_head %= self.m_cap
@@ -76,23 +77,25 @@ class data_thread(threading.Thread):
 
 	def run(self):
 		while True:
+			self.make_data()
 			time.sleep(0.01)
-			cur_tm = time.time() * 1000
-			if cur_tm < self.m_last:
-				continue
-			count = random.randint(1,10)
-			self.m_last = cur_tm + random.randint(200,500) 
-			for i in xrange(count):
-				data = make_chat(3,20,3,10)
-				if data == 'quit': 
-					self.m_quit = True
-					break
-				if data != '' and data != None:
-					self.add_data(data)
 
-def out_fun(data,user_data):
+	def make_data(self):
+		cur_tm = time.time() * 1000
+		if cur_tm < self.m_last:
+			return	
+		count = random.randint(1,10)
+		self.m_last = cur_tm + random.randint(200,500) 
+		for i in xrange(count):
+			data = make_chat(3,20,3,10)
+			self.add_data(data)
+
+def GetMillisecond():
+    return int(time.time()*1000)
+
+def out_fun(user_data,data):
 	user_data.sendto(data,("127.0.0.1",8000))
-	
+
 def recv_udp(sock):
 	try:
 		data,udp_addr = sock.recvfrom(65535)
@@ -111,10 +114,14 @@ if __name__ == '__main__':
 	make_letter()
 	udp_sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
 	udp_sock.setblocking(0)
-	g_thread.start()
-	client_kcp.set_nodelay(0,40,0,0)
+	# g_thread.start()
+	star_tm = GetMillisecond()
+	client_kcp.set_nodelay(1,10,2,1)
+	client_kcp.win_size(10,128)
+	client_kcp.mtu_size(576)
 	while not g_thread.m_quit:
 		count = 0
+		g_thread.make_data()
 		while count <= 10: 
 			data = g_thread.get_data()
 			if data != None:
@@ -123,10 +130,13 @@ if __name__ == '__main__':
 			else:
 				break
 			count += 1
-		data = client_kcp.recv_data()
-		if data != None:
-			print("%3d recv=%s"%(len(data),data))
-		client_kcp.update(time.time())
+		while True:
+			data = client_kcp.recv_data()
+			if data != None:
+				print("%3d recv=%s"%(len(data),data))
+			else:
+				break
+		client_kcp.update(GetMillisecond() - star_tm)
 		data = recv_udp(udp_sock)
 		if data != None:
 			client_kcp.input_data(data)
